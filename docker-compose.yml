@@ -1,0 +1,37 @@
+# Single-command bring-up:  docker compose up --build
+#
+#   db       Postgres, the only long-running service.
+#   migrate  one-shot: waits for db to be healthy, runs `prisma migrate deploy`
+#            then `prisma db seed`, then exits 0. The db keeps running with the
+#            schema + seed data loaded.
+#
+# Reset to a clean slate:  docker compose down -v
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab
+      POSTGRES_DB: lab
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://lab:lab@db:5432/lab?schema=public"
+    command: ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed"]
+
+volumes:
+  db_data:

@@ -1,0 +1,245 @@
+// Laboratory Experiment Tracking System — data model.
+//
+// Modeling stance:
+//   - Bounded, stable lifecycle sets are Postgres ENUMs (project/experiment status,
+//     and the measurement value-kind, which is a closed set of storage shapes).
+//   - Open-ended domains the lab grows over time ("...and so on", "new kinds added
+//     occasionally") are REFERENCE TABLES so a new value is a row, not a migration:
+//     roles, specimen_types, measurement_types.
+//
+// Naming: Prisma models are PascalCase; tables/columns are mapped to snake_case so the
+// generated Postgres DDL reads naturally.
+//
+// CHECK constraints and the composite FK that binds a measurement's value column to its
+// catalog type cannot be expressed in this schema language; they live in the
+// `*_measurement_integrity` raw-SQL migration. See README "Measurement integrity".
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------------------------------------------------------------------------
+// Enums (closed, stable sets)
+// ---------------------------------------------------------------------------
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("project_status")
+}
+
+enum ExperimentStatus {
+  PLANNING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("experiment_status")
+}
+
+/// The storage shape of a measurement. Drives which value column is populated.
+enum MeasurementValueKind {
+  NUMERIC
+  CATEGORICAL
+  TEXT
+
+  @@map("measurement_value_kind")
+}
+
+// ---------------------------------------------------------------------------
+// Reference tables (open-ended, grow as data)
+// ---------------------------------------------------------------------------
+
+model Role {
+  id          Int          @id @default(autoincrement())
+  name        String       @unique
+  description String?
+  researchers Researcher[]
+
+  @@map("roles")
+}
+
+model SpecimenType {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  samples     Sample[]
+
+  @@map("specimen_types")
+}
+
+/// Catalog of measurement kinds. Adding a new kind (e.g. a spectrum, an image path)
+/// is an INSERT here, not a schema change. `value_kind` declares how its values are
+/// stored; `allowed_categories` optionally constrains CATEGORICAL outcomes.
+model MeasurementType {
+  id                Int                  @id @default(autoincrement())
+  name              String               @unique
+  valueKind         MeasurementValueKind @map("value_kind")
+  defaultUnit       String?              @map("default_unit")
+  allowedCategories String[]             @map("allowed_categories")
+  description       String?
+  measurements      Measurement[]
+
+  // Composite unique is the target of the measurements composite FK that pins each
+  // measurement's value_kind to its catalog type. (id alone is already unique; this
+  // pairing exists purely so (measurement_type_id, value_kind) can reference it.)
+  @@unique([id, valueKind], name: "measurement_type_id_value_kind")
+  @@map("measurement_types")
+}
+
+// ---------------------------------------------------------------------------
+// Core entities
+// ---------------------------------------------------------------------------
+
+model Researcher {
+  id        Int      @id @default(autoincrement())
+  firstName String   @map("first_name")
+  lastName  String   @map("last_name")
+  email     String   @unique
+  phone     String?
+  roleId    Int      @map("role_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // A researcher's current role. Restrict: a role in use cannot be deleted.
+  role     Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  projects ProjectResearcher[]
+
+  @@index([roleId])
+  @@map("researchers")
+}
+
+model Project {
+  id          Int           @id @default(autoincrement())
+  title       String
+  description String?
+  status      ProjectStatus @default(PLANNING)
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  researchers ProjectResearcher[]
+  experiments Experiment[]
+
+  @@map("projects")
+}
+
+/// Many-to-many membership. `is_lead` marks the project lead/PI — distinct from a
+/// researcher's lab role, since lead-ness is per project.
+model ProjectResearcher {
+  projectId    Int      @map("project_id")
+  researcherId Int      @map("researcher_id")
+  isLead       Boolean  @default(false) @map("is_lead")
+  joinedAt     DateTime @default(now()) @map("joined_at")
+
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  researcher Researcher @relation(fields: [researcherId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, researcherId])
+  @@index([researcherId])
+  @@map("project_researchers")
+}
+
+model Experiment {
+  id                 Int              @id @default(autoincrement())
+  projectId          Int              @map("project_id")
+  title              String
+  hypothesis         String?
+  startDate          DateTime?        @map("start_date") @db.Date
+  endDate            DateTime?        @map("end_date") @db.Date
+  status             ExperimentStatus @default(PLANNING)
+  parentExperimentId Int?             @map("parent_experiment_id")
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @updatedAt @map("updated_at")
+
+  // Belongs to exactly one project; deleting the project cascades its experiments.
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // Self-referential "follow-up to a previous experiment" (replication / iteration /
+  // refined hypothesis). Forms a chain/tree. SetNull: deleting a parent keeps the
+  // follow-ups but severs the lineage link.
+  parent    Experiment?  @relation("ExperimentFollowUp", fields: [parentExperimentId], references: [id], onDelete: SetNull)
+  followUps Experiment[] @relation("ExperimentFollowUp")
+
+  samples      ExperimentSample[]
+  measurements Measurement[]
+
+  @@index([projectId])
+  @@index([parentExperimentId])
+  @@map("experiments")
+}
+
+model Sample {
+  id              Int       @id @default(autoincrement())
+  sampleCode      String    @unique @map("sample_code")
+  specimenTypeId  Int       @map("specimen_type_id")
+  collectedAt     DateTime? @map("collected_at")
+  storageLocation String?   @map("storage_location")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  specimenType SpecimenType       @relation(fields: [specimenTypeId], references: [id], onDelete: Restrict)
+  experiments  ExperimentSample[]
+  measurements Measurement[]
+
+  @@index([specimenTypeId])
+  @@map("samples")
+}
+
+/// Many-to-many: an experiment uses many samples; a sample is used across many
+/// experiments. Cascade from either side removes only the usage link.
+model ExperimentSample {
+  experimentId Int @map("experiment_id")
+  sampleId     Int @map("sample_id")
+
+  experiment Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+  sample     Sample     @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+
+  @@id([experimentId, sampleId])
+  @@index([sampleId])
+  @@map("experiment_samples")
+}
+
+/// A data point produced by an experiment. Exactly one of numeric/categorical/text
+/// value is populated, and it must match the catalog type's value_kind — both enforced
+/// in the *_measurement_integrity migration (CHECK + composite FK on the relation below).
+model Measurement {
+  id                Int                  @id @default(autoincrement())
+  experimentId      Int                  @map("experiment_id")
+  sampleId          Int?                 @map("sample_id")
+  measurementTypeId Int                  @map("measurement_type_id")
+  valueKind         MeasurementValueKind @map("value_kind")
+  numericValue      Decimal?             @map("numeric_value") @db.Decimal(18, 6)
+  unit              String?
+  categoricalValue  String?              @map("categorical_value")
+  textValue         String?              @map("text_value")
+  measuredAt        DateTime             @default(now()) @map("measured_at")
+  notes             String?
+  createdAt         DateTime             @default(now()) @map("created_at")
+
+  // Associated with exactly one experiment; cascades with it.
+  experiment Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+
+  // "usually references the sample" -> optional. SetNull keeps the reading if a sample
+  // record is purged.
+  sample Sample? @relation(fields: [sampleId], references: [id], onDelete: SetNull)
+
+  // Composite relation: (measurement_type_id, value_kind) -> measurement_types(id,
+  // value_kind). This is what guarantees a measurement's stored shape matches its
+  // catalog type. Restrict: a type in use cannot be deleted.
+  measurementType MeasurementType @relation(fields: [measurementTypeId, valueKind], references: [id, valueKind], onDelete: Restrict)
+
+  @@index([experimentId])
+  @@index([sampleId])
+  @@index([measurementTypeId])
+  @@index([measuredAt])
+  @@map("measurements")
+}
