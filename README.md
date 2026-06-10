@@ -5,6 +5,9 @@ experiments, samples, and the measurements those experiments produce. The schema
 with [Prisma](https://www.prisma.io/) (PostgreSQL provider) and applied as versioned SQL
 migrations; everything runs in Docker.
 
+> **Web UI:** a Next.js app with full CRUD over the model lives in [`web/`](web/) — see
+> [web/README.md](web/README.md). It reuses this schema and the Postgres started below.
+
 ---
 
 ## Quick start
