@@ -1,18 +1,23 @@
-# Laboratory Experiment Tracking System — Data Model
+# Laboratory Experiment Tracking System
 
-A Postgres data model for tracking a research lab's experiments: researchers, projects,
-experiments, samples, and the measurements those experiments produce. The schema is defined
-with [Prisma](https://www.prisma.io/) (PostgreSQL provider) and applied as versioned SQL
-migrations; everything runs in Docker.
+Tracking a research lab's experiments: researchers, projects, experiments, samples, and the
+measurements those experiments produce. The repository has **two parts**:
 
-> **Web UI:** a Next.js app with full CRUD over the model lives in [`web/`](web/) — see
-> [web/README.md](web/README.md). It reuses this schema and the Postgres started below.
+- **Data model** — the Postgres schema, defined with [Prisma](https://www.prisma.io/) (PostgreSQL
+  provider) and applied as versioned SQL migrations, with seed data. Runs entirely in Docker.
+  *This is the core of the project, and most of this README is about it.*
+- **Web UI** ([`web/`](web/)) — a [Next.js](https://nextjs.org/) app providing full CRUD over the
+  model. Optional; reuses the same schema and Postgres. See [The web UI](#the-web-ui) and
+  [`web/README.md`](web/README.md).
 
 ---
 
 ## Quick start
 
-**Prerequisite:** Docker (with Compose v2). Nothing else — no local Node or Postgres needed.
+**Prerequisites:** [Docker](https://docs.docker.com/) (with Compose v2) for the database;
+[Node.js](https://nodejs.org/) 20+ only if you also want to run the web UI.
+
+### 1. Start the database
 
 ```bash
 docker compose up --build
@@ -25,14 +30,14 @@ That single command:
    `prisma db seed` (seed data) in the one-shot `migrate` container,
 3. the `migrate` container exits `0`; **the `db` keeps running with schema + seed loaded.**
 
-Connect to the running database:
+Connect to it directly:
 
 ```bash
 psql postgresql://lab:lab@localhost:5432/lab
 # or:  docker compose exec db psql -U lab -d lab
 ```
 
-**Reset to a clean slate** (drops the data volume, so the next `up` re-migrates and re-seeds):
+Reset to a clean slate (drops the data volume, so the next `up` re-migrates and re-seeds):
 
 ```bash
 docker compose down -v
@@ -41,9 +46,21 @@ docker compose down -v
 > The seed is idempotent — re-running `docker compose up` on an already-seeded database skips
 > seeding rather than duplicating. Use `down -v` to start over.
 
+### 2. (Optional) Run the web UI
+
+With the database from step 1 running:
+
+```bash
+cd web
+npm install        # also syncs the schema + generates the Prisma client
+npm run dev        # http://localhost:3000
+```
+
+`web/.env` already points at the Postgres above. See [The web UI](#the-web-ui) for what it does.
+
 ---
 
-## What the model looks like
+## The data model
 
 ```mermaid
 erDiagram
@@ -144,8 +161,51 @@ four bad-write cases are rejected by the database:
 | no value column populated | CHECK |
 
 The one rule *not* enforced in-DB is that a `CATEGORICAL` value falls within the type's
-`allowed_categories` — a conditional foreign key can't express that. It's left to the
-application layer (see open questions).
+`allowed_categories` — a conditional foreign key can't express that. It's left to the application
+layer; the [web UI](#the-web-ui) implements it (its Server Actions validate the value, and the
+form only offers valid options), and whether to *also* enforce it in the database is an
+[open question](#open-questions-for-the-lab).
+
+---
+
+## The web UI
+
+A [Next.js 16](https://nextjs.org/) (App Router) app in [`web/`](web/) with full CRUD over every
+entity in the model. A browser can't talk to Postgres directly, so the app *is* the server layer:
+React Server Components read the database through Prisma, and Server Actions perform the writes —
+the browser only ever calls the server.
+
+**Stack:** Next.js 16 · React 19 · Tailwind CSS v4 · Prisma (against the same Postgres).
+
+**What it covers**
+
+| Area | Highlights |
+|---|---|
+| Dashboard | Counts, projects-by-status, measurements-by-type, recent experiments |
+| Projects | CRUD + member management (add/remove, toggle lead) |
+| Experiments | CRUD, project-scoped **follow-up** parent picker, sample linking |
+| Measurements | CRUD with a **type-aware form**, filters by experiment/type |
+| Samples | CRUD, usage across experiments |
+| Researchers | CRUD with role |
+| Catalog | Roles, Specimen Types, Measurement Types (the extensible reference tables) |
+
+**The type-aware measurement form** is the piece that best exercises the model: choosing a
+measurement type switches the value input to numeric + unit, a constrained category dropdown, or
+free text depending on the type's `value_kind`, and a categorical type only offers its
+`allowed_categories`.
+
+**Single source of truth.** The root [`prisma/schema.prisma`](prisma/schema.prisma) owns the
+schema and migrations. The web app does **not** define or migrate it — on `postinstall` /
+`predev` / `prebuild` it runs [`web/scripts/pull-schema.mjs`](web/scripts/pull-schema.mjs), which
+copies the root schema into `web/prisma/schema.prisma` (gitignored) and regenerates the Prisma
+client. So the UI always reflects the canonical schema, with no second copy to drift.
+
+**Integrity is defense-in-depth:** the form offers only valid inputs → the Server Action
+re-derives `value_kind` from the catalog and validates the categorical value against
+`allowed_categories` → the schema's composite FK + CHECK are the final backstop, so even a direct
+SQL write can't store an inconsistent measurement.
+
+Full detail in [`web/README.md`](web/README.md).
 
 ---
 
@@ -234,18 +294,23 @@ The brief is intentionally incomplete. Decisions made, to keep moving:
 ├── docker-compose.yml          # db + one-shot migrate/seed service
 ├── Dockerfile                  # Node image that runs migrate deploy + seed
 ├── prisma/
-│   ├── schema.prisma           # the data model (source of truth)
+│   ├── schema.prisma           # the data model — single source of truth
 │   ├── seed.ts                 # TypeScript seed via the Prisma client
 │   └── migrations/
 │       ├── 20260610201734_init/                  # generated baseline DDL
 │       └── 20260610201749_measurement_integrity/ # raw SQL: CHECKs the DSL can't express
+├── web/                        # Next.js web UI (see web/README.md)
+│   ├── src/app/                # routes — one folder per entity (actions.ts + pages)
+│   ├── src/components/         # UI primitives, Nav, form buttons
+│   ├── src/lib/                # Prisma client, form parsing, formatting, enums
+│   └── scripts/pull-schema.mjs # syncs the root schema + generates the client
 ├── package.json
 └── README.md
 ```
 
-## Working on it locally (optional)
+## Iterating on the schema (optional)
 
-You don't need this to run the project, but to iterate on the schema:
+You don't need this to run the project, but to change the data model:
 
 ```bash
 cp .env.example .env                 # points at localhost:5432
