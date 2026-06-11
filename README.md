@@ -175,6 +175,8 @@ entity in the model. A browser can't talk to Postgres directly, so the app *is* 
 React Server Components read the database through Prisma, and Server Actions perform the writes —
 the browser only ever calls the server.
 
+![Lab Tracker dashboard](docs/dashboard.png)
+
 **Stack:** Next.js 16 · React 19 · Tailwind CSS v4 · Prisma (against the same Postgres).
 
 **What it covers**
